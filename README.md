@@ -202,7 +202,7 @@ function testShareInflation() public {
 Source: https://github.com/sherlock-audit/2025-01-peapods-finance-judging/issues/175 
 
 ## Found by 
-fibonacci
+TessKimy, fibonacci
 
 ### Summary
 
@@ -342,7 +342,7 @@ Before processing the deposit, ensure that there are stakers in the `TokenReward
 Source: https://github.com/sherlock-audit/2025-01-peapods-finance-judging/issues/442 
 
 ## Found by 
-RampageAudit, X77, pkqs90
+RampageAudit, X77, future2\_22, pkqs90, super\_jack
 
 
 ### Summary
@@ -488,7 +488,7 @@ If there are leftover pTKNs, before swapping pairedLpTKN to pTKN, calculate the 
 Source: https://github.com/sherlock-audit/2025-01-peapods-finance-judging/issues/445 
 
 ## Found by 
-pkqs90
+bretzel, pkqs90
 
 
 ### Summary
@@ -749,114 +749,33 @@ _No response_
     }
 ```
 
-# Issue M-1: `flashMint` would mint the admins an enourmous amounts of fees, leading to TX reverting in most cases 
+# Issue M-1: MEV bots will steal from users due to an incorrectly manipulated value 
 
-Source: https://github.com/sherlock-audit/2025-01-peapods-finance-judging/issues/48 
+Source: https://github.com/sherlock-audit/2025-01-peapods-finance-judging/issues/41 
 
 ## Found by 
-PNS, X77, fibonacci
+Honour, RampageAudit, X77, future2\_22, super\_jack
 
 ### Summary
 
-`flashMint` upon minting to the user would mint an enormous amounts of fees to the admin, due to `_mint` invoking `_update` with the flash loan amount.
-
-```solidity
-    function flashMint(address _recipient, uint256 _amount, bytes calldata _data) external override lock {
-        _shortCircuitRewards = 1;
-        uint256 _fee = _amount / 1000;
-        _mint(_recipient, _amount); // @audit it would trigger update and mint the admins fees from transfers that are not of "real" tokens
-```
-
-```solidity
-    function _update(address _from, address _to, uint256 _amount) internal override {
-        require(!_blacklist[_to], "BK");
-
-        bool _buy = _from == V2_POOL && _to != V2_ROUTER;
-        bool _sell = _to == V2_POOL;
-        uint256 _fee;
-
-        if (_swapping == 0 && _swapAndFeeOn == 1) {
-            if (_from != V2_POOL) {
-                _processPreSwapFeesAndSwap();
-            }
-            if (_buy && _fees.buy > 0) {
-                _fee = (_amount * _fees.buy) / DEN;
-                super._update(_from, address(this), _fee);
-            } else if (_sell && _fees.sell > 0) {
-                _fee = (_amount * _fees.sell) / DEN;
-                super._update(_from, address(this), _fee);
-
-            //@audit right here
-            } else if (!_buy && !_sell && _config.hasTransferTax) {
-                _fee = _amount / 10000; // 0.01%
-                _fee = _fee == 0 && _amount > 0 
-                    ? 1 
-                    : _fee;
-                super._update(_from, address(this), _fee);
-            }
-        }
-
-        _processBurnFee(_fee);
-        super._update(_from, _to, _amount - _fee);
-    }
-```
-
-This is dangerous as these transfers are not from "real" tokens, but ones that are used for 1 time use during rush moments, like liquidations, leveraging and so on...
-
-
-Note that the same happens in burn, which is also invoked inside this function. This would not only cause the fee to be higher, **but also to be taken 2 times, as both mint and burn would charge it**.
-
-```solidity
-        _mint(_recipient, _amount);
-        IFlashLoanRecipient(_recipient).callback(_data);
-        _burn(_recipient, _amount);
-```
+MEV bots will steal from users due to an incorrectly manipulated value
 
 ### Root Cause
 
-`_mint` triggers `_update` minting an enormous amounts of fees, reducing the FL amount that our user receives, leading to his inability to repay the loan and the TX reverting.
-
-https://github.com/sherlock-audit/2025-01-peapods-finance/blob/main/contracts/contracts/DecentralizedIndex.sol#L427
+Upon calling `Zapper::_zap()` to handle a transfer of a different token, we have the following code which is for a direct swap in a Uniswap V3 pool:
 ```solidity
-    function flashMint(address _recipient, uint256 _amount, bytes calldata _data) external override lock {
-        _shortCircuitRewards = 1;
-        uint256 _fee = _amount / 1000;
-        _mint(_recipient, _amount); // @audit it would trigger update and mint the admins fees from transfers that are not of "real" tokens
+else {
+        _amountOut = _swapV3Single(_in, _getPoolFee(_poolInfo.pool1), _out, _amountIn, _amountOutMin);
+
+}
 ```
-https://github.com/sherlock-audit/2025-01-peapods-finance/blob/main/contracts/contracts/DecentralizedIndex.sol#L174-L177
+The `_amountOutMin` is provided by the user as slippage. The issue is that upon calling `_swapV3Single()`, we have the following code:
 ```solidity
-    function _update(address _from, address _to, uint256 _amount) internal override {
-        require(!_blacklist[_to], "BK");
-
-        bool _buy = _from == V2_POOL && _to != V2_ROUTER;
-        bool _sell = _to == V2_POOL;
-        uint256 _fee;
-
-        if (_swapping == 0 && _swapAndFeeOn == 1) {
-            if (_from != V2_POOL) {
-                _processPreSwapFeesAndSwap();
-            }
-            if (_buy && _fees.buy > 0) {
-                _fee = (_amount * _fees.buy) / DEN;
-                super._update(_from, address(this), _fee);
-            } else if (_sell && _fees.sell > 0) {
-                _fee = (_amount * _fees.sell) / DEN;
-                super._update(_from, address(this), _fee);
-
-            //@audit right here
-            } else if (!_buy && !_sell && _config.hasTransferTax) {
-                _fee = _amount / 10000; // 0.01%
-                _fee = _fee == 0 && _amount > 0 
-                    ? 1 
-                    : _fee;
-                super._update(_from, address(this), _fee);
-            }
-        }
-
-        _processBurnFee(_fee);
-        super._update(_from, _to, _amount - _fee);
-    }
+uint256 _finalSlip = _slippage[_v3Pool] > 0 ? _slippage[_v3Pool] : _defaultSlippage;
+...
+DEX_ADAPTER.swapV3Single(_in, _out, _fee, _amountIn, (_amountOutMin * (1000 - _finalSlip)) / 1000, address(this));
 ```
+As seen, the provided minimum amount is manipulated and decreased further.
 
 ### Internal Pre-conditions
 
@@ -868,16 +787,12 @@ _No response_
 
 ### Attack Path
 
-1. User uses flashmint to perform some kind of arbitrage
-2. Needs 10m
-3. Fees are 0.1%, so 10k gets minted to the admin as a fee
-4. User is unable to repay the loan, so the TX reverts
+1. User provides 100 tokens to swap and wants at least 90 in return
+2. The 90 minimum tokens input is decreased by `_finalSlip` percentage, resulting in the user receiving less than what he provided
 
 ### Impact
 
-Users unable to use flash-loans due to `_mint` triggering `_update` which would mint percentage fee to the system.
-FL revert in most cases.
-Fee is taken 2 times, as mint and burn would take a part each time they are invoked.
+Theft of funds from innocent users who have done nothing wrong
 
 ### PoC
 
@@ -885,14 +800,79 @@ _No response_
 
 ### Mitigation
 
-Don't charge percentage based fees on FL.
+Do not manipulate the value for users who provided a specific amount of minimum tokens to receive
 
-# Issue M-2: `_protocolFees` can be applied multiple times in `AutoCompoundingPodLp` contract 
+# Issue M-2: Liquidations will revert incorrectly due to an out-of-sync leftover collateral value 
+
+Source: https://github.com/sherlock-audit/2025-01-peapods-finance-judging/issues/74 
+
+## Found by 
+X77
+
+### Summary
+
+Liquidations will revert incorrectly due to an out-of-sync value
+
+### Root Cause
+
+Upon liquidations, we have this code:
+```solidity
+_leftoverCollateral = (_userCollateralBalance.toInt256() - _optimisticCollateralForLiquidator.toInt256());
+
+_collateralForLiquidator = _leftoverCollateral <= 0 ? _userCollateralBalance : (_liquidationAmountInCollateralUnits * (LIQ_PRECISION + dirtyLiquidationFee)) / LIQ_PRECISION;
+```
+We compute an optimistic collateral for the liquidator which is based on `cleanLiquidationFee`. If the leftover collateral is not below 0, we recompute the collateral for liquidator based on the `dirtyLiquidationFee` which is a value lower than the clean fee (if we take a look at [Fraxlend](https://etherscan.io/address/0x78bb3aec3d855431bd9289fd98da13f9ebb7ef15#code), it is 9000 vs 10000 for the clean fee).
+
+Then, we have this code:
+```solidity
+if (_leftoverCollateral <= 0) {
+                ...
+} else if (_leftoverCollateral < minCollateralRequiredOnDirtyLiquidation.toInt256()) {
+       revert BadDirtyLiquidation();
+}
+```
+If the leftover collateral is <=, we end up in the first block where we compute shares to adjust. If it is above 0 however, we will revert if we are under `minCollateralRequiredOnDirtyLiquidation`. The issue is that the leftover collateral is still based on the optimistic calculation which results in a much lower leftover collateral, resulting in reverts when the actual leftover collateral is not even close to `minCollateralRequiredOnDirtyLiquidation`.
+
+### Internal Pre-conditions
+
+_No response_
+
+### External Pre-conditions
+
+_No response_
+
+### Attack Path
+
+1. Let's imagine the following state:
+- userCollateralBalance = 2.3e18
+- dirtyLiquidationFee = 9_000 (based on Fraxlend)
+- cleanLiquidationFee = 10_000 (based on Fraxlend)
+- `_liquidationAmountInCollateralUnits` is equal to 2e18 based on the shares to liquidate provided by the user
+- `minCollateralRequiredOnDirtyLiquidation` is 1.1e17
+2. `_optimisticCollateralForLiquidator` will equal `2e18 * (1e5 + 1e4) / 1e5 = 2.2e18`
+3. `_leftoverCollateral` equals `2.3e18 - 2.2e18 = 1e17`
+4. As it is above 0, we recompute the collateral for liquidator which will equal `2e18 * (1e5 + 9e3) / 1e5 = 2.18e18`
+5. As the leftover collateral is 1e17 and the minimum required collateral is 1.1e17, we will revert
+6. In reality, the actual leftover collateral is `2.3e18 - 2.18e18 = 1.2e17` as the collateral we will take out from the user is 2.18e18, not 2.2e18
+
+### Impact
+
+Liquidations will revert incorrectly which is an extremely time-sensitive operation, this can lead to bad debt for the protocol
+
+### PoC
+
+_No response_
+
+### Mitigation
+
+Update the leftover collateral based on the new collateral for the liquidator
+
+# Issue M-3: `_protocolFees` can be applied multiple times in `AutoCompoundingPodLp` contract 
 
 Source: https://github.com/sherlock-audit/2025-01-peapods-finance-judging/issues/157 
 
 ## Found by 
-X77, ZoA, pkqs90
+X77, ZoA, pashap9990, pkqs90
 
 ### Summary
 
@@ -946,12 +926,12 @@ To be correct, the fee should be paid only for the newly distributed `PAIRED_LP_
 The protocol fee must be paid only if the swap to `PodLp` is successful.
 Or keep track of the amount of `PAIRED_LP_TOKEN` remaining in the contract if the swap fails.
 
-# Issue M-3: `addInterest` will not update the interest acurately which would enable users to claim rewards for time that they weren't staked inside `LendingAssetVault` 
+# Issue M-4: `addInterest` will not update the interest acurately which would enable users to claim rewards for time that they weren't staked inside `LendingAssetVault` 
 
 Source: https://github.com/sherlock-audit/2025-01-peapods-finance-judging/issues/171 
 
 ## Found by 
-X77, pkqs90
+JohnTPark24, TessKimy, X77, pkqs90
 
 ### Summary
 
@@ -1092,7 +1072,7 @@ Rely on `previewAddInterest` for if the interest should be worth changing as it 
         InterestCalculationResults memory _results = _calculateInterest(_newCurrentRateInfo);
 ```
 
-# Issue M-4: Reward tokens could be locked in `VotingPool` contract 
+# Issue M-5: Reward tokens could be locked in `VotingPool` contract 
 
 Source: https://github.com/sherlock-audit/2025-01-peapods-finance-judging/issues/180 
 
@@ -1140,7 +1120,7 @@ _No response_
 
 Introduce mechanism of handling reward tokens.
 
-# Issue M-5: Open fee is overcharged in `_addLeveragePostCallback` function 
+# Issue M-6: Open fee is overcharged in `_addLeveragePostCallback` function 
 
 Source: https://github.com/sherlock-audit/2025-01-peapods-finance-judging/issues/185 
 
@@ -1251,198 +1231,7 @@ Users will pay more open fees than the amount of `pairedLPToken` actually used f
     }
 ```
 
-# Issue M-6: Balancer governance flashloan fee activation breaks Balancer flashloan execution 
-
-Source: https://github.com/sherlock-audit/2025-01-peapods-finance-judging/issues/207 
-
-## Found by 
-0xAadi, 0xe4669da, X77, ZoA, bretzel, elolpuer
-
-### Summary
-
-If Balancer Governance activates the flashloan fee, it will be impossible for users to execute flashloans through `BalancerFlashSource.sol` because the fee is not properly forwarded. As a result, vital operations (`addLeverage` or `removeLeverage`) will revert, affecting users who depend on flashloan for leverage.
-
-### Root Cause
-
-In [BalancerFlashSource.sol](https://github.com/sherlock-audit/2025-01-peapods-finance/blob/main/contracts/contracts/flash/BalancerFlashSource.sol#L56) the flashloan fee is not properly returned to the callback:
-  - The `receiveFlashLoan` function decodes the flashloan data and sets the fee in the local variable `_fData` but then calls the recipient callback without re-encoding the updated data.
-    ```solidity
-    function receiveFlashLoan(
-        IERC20[] memory,
-        uint256[] memory,
-        uint256[] memory _feeAmounts,
-        bytes memory _userData
-    )
-        external
-        override
-        workflow(false)
-    {
-        require(_msgSender() == source, "CBV");
-        FlashData memory _fData = abi.decode(_userData, (FlashData));
-        _fData.fee = _feeAmounts[0];
-        IERC20(_fData.token).safeTransfer(_fData.recipient, _fData.amount);
-        IFlashLoanRecipient(_fData.recipient).callback(_userData);
-    }
-    ```
-As the callback is still invoked with the original `_userData` (which lacks the updated fee information), any changes in the fee (as would happen if flashloan fees are activated) result in an underpayment of the fee, causing the flashloan to revert.
-
-### Internal Pre-conditions
-
-1. `BalancerFlashSource` is set for the borrowed token.
-
-### External Pre-conditions
-
-1. Balancer Governance activates flashloan fees, as detailed in [Balancer Protocol Fees Documentation](https://docs-v2.balancer.fi/concepts/governance/protocol-fees.html#flash-loan-fees).
-2. The external Balancer contract (via [_calculateFlashLoanFeeAmount()](https://github.com/balancer/balancer-v2-monorepo/blob/36d282374b457dddea828be7884ee0d185db06ba/pkg/vault/contracts/FlashLoans.sol#L60)) returns a non-zero fee in the flashloan, which must be repaid along with the principal.
-
-### Attack Path
-
-1. Balancer Governance activates flashloan fees.
-2. A user invokes a flashloan-dependent function (e.g., `addLeverage` or `removeLeverage`) using BalancerFlashSource.
-3. During flashloan execution, the Balancer vault calculates a fee based on the requested amount.
-4. The `receiveFlashLoan` function in BalancerFlashSource updates the local fee field but fails to re-encode the updated FlashData when calling the recipient callback.
-5. The recipient receives outdated data without the actual fee, causing the loan repayment to miss the fee.
-6. As a result, the flashloan repayment check fails, reverting the transaction.
-
-### Impact
-
-Users will be unable to successfully execute Balancer flashloan operations if the flashloan fee is activated by governance. This means that any operation relying on a flashloan (`addLeverage` or `removeLeverage`) will revert due to an insufficient fee repayment, essentially rendering the BalancerFlashSource unusable under these conditions.
-
-### PoC
-
-N/A
-
-### Mitigation
-
-Modify the `receiveFlashLoan()` function to ensure that the recipient receives the updated FlashData including the fee by passing the updated `_fData`:
-
-```diff
-function receiveFlashLoan(
-    IERC20[] memory,
-    uint256[] memory,
-    uint256[] memory _feeAmounts,
-    bytes memory _userData
-)
-    external
-    override
-    workflow(false)
-{
-    require(_msgSender() == source, "CBV");
-    FlashData memory _fData = abi.decode(_userData, (FlashData));
-    _fData.fee = _feeAmounts[0];
-    IERC20(_fData.token).safeTransfer(_fData.recipient, _fData.amount);
--   IFlashLoanRecipient(_fData.recipient).callback(_userData);
-+   IFlashLoanRecipient(_fData.recipient).callback(abi.encode(_fData));
-}
-```
-
-This change ensures that the recipient callback correctly receives the fee amount to send.
-
-# Issue M-7: Missing slippage when debonding will cause a serious loss for the last withdrawer 
-
-Source: https://github.com/sherlock-audit/2025-01-peapods-finance-judging/issues/227 
-
-## Found by 
-X77
-
-### Summary
-
-Missing slippage when debonding will cause a serious loss for the last withdrawer
-
-### Root Cause
-
-Debonding from a pod has a debonding fee for every withdrawer except the last one (or if whitelisted from debond fee):
-```solidity
- uint256 _amountAfterFee = _isLastOut(_amount) || REWARDS_WHITELIST.isWhitelistedFromDebondFee(_msgSender()) ? _amount : (_amount * (DEN - _fees.debond)) / DEN;
-```
-This means that the last withdrawer can be either maliciously or accidentally frontran by another user depositing which will result in a direct loss for him as he will incur a debonding fee unexpectedly. The losses with a debonding fee of 2% are close to 2% and close to 50\$ (assuming token is WETH at 2500\$ price) which pass the criteria for high severity according to the docs (required for high is 1% and 10\$), you can check POC to confirm.
-
-### Internal Pre-conditions
-
-1. User withdraws as last withdrawor, he gets frontran by another user who deposits, either maliciously or accidentally
-
-### External Pre-conditions
-
-No such
-
-### Attack Path
-
-Attack path is somewhat clear, the issue is simple. Check the POC section to see it however and see the exact loss as well.
-
-### Impact
-
-Loss of funds, 48\$ and ~2% if the debonding fee is 2% which is perfectly normal and expected, these numbers are sufficient of High severity.
-
-### PoC
-
-Paste the following function in `DecentralizedIndex` so we can set the fee:
-```solidity
-function setFees() public {
-        _fees.debond = 200;
-    }
-```
-Then, paste the following POC in `WeightedIndex.t.sol`:
-```solidity
-        function testNoSlippageLoss() public {
-        assertEq(pod.totalSupply(), 0); // Empty pod
-        IDecentralizedIndex.IndexAssetInfo[] memory assets = pod.getAllAssets();
-        assertEq(assets.length, 1); // 1 token
-        pod.setFees();
-        /* ADDED THE BELOW FUNCTION, 2% DEBOND FEE
-        function setFees() public {
-            _fees.debond = 200;
-        }
-        */
-
-        address user1 = makeAddr('user1');
-        address user2 = makeAddr('user2');
-        address token = assets[0].token;
-
-        deal(token, user1, 1e18);
-        deal(token, user2, 1e18);
-
-        uint256 initialBalance = IERC20(token).balanceOf(user1);
-        vm.startPrank(user1);
-        IERC20(token).approve(address(pod), type(uint256).max);
-        pod.bond(token, 1e18, 0); // User 1 deposits
-        vm.stopPrank();
-
-        // User1 wants to withdraw but gets frontran by the user2 deposit!
-        vm.startPrank(user2);
-        IERC20(token).approve(address(pod), type(uint256).max);
-        pod.bond(token, 1e18, 0);
-        vm.stopPrank();
-        
-        assertEq(pod.balanceOf(user1), 1e18);
-        address[] memory x = new address[](0);
-        uint8[] memory y = new uint8[](0);
-        vm.startPrank(user1);
-        pod.debond(pod.balanceOf(user1), x, y);
-        vm.stopPrank();
-
-        assertEq(pod.balanceOf(user1), 0);
-
-        console.log("Percentage loss in 1e18 format:");
-        console.log((initialBalance - IERC20(token).balanceOf(user1)) * 1e18 / initialBalance); // % loss
-        console.log("Dollar loss:");
-        console.log((initialBalance - IERC20(token).balanceOf(user1)) * 2500 / 1e18); // Dollar loss assuming ETH price is 2500$
-    }
-```
-
-LOGS:
-```solidity
-Percentage loss in 1e18 format:
-19509754877438720
-Dollar loss:
-48
-```
-
-
-### Mitigation
-
-Add slippage when debonding whether a user is fine with getting charged a debonding fee
-
-# Issue M-8: The attacker can steal rewards from AutoCompoundingPodLP because in _processRewardsToPodLp, the rewards from TokenRewards are not distributed 
+# Issue M-7: The attacker can steal rewards from AutoCompoundingPodLP because in _processRewardsToPodLp, the rewards from TokenRewards are not distributed 
 
 Source: https://github.com/sherlock-audit/2025-01-peapods-finance-judging/issues/233 
 
@@ -2045,61 +1834,7 @@ contract AuditTests is PodHelperTest {
 ```
 3. The POC can then be started with `forge test --mt testPoc -vv --fork-url <FORK_URL>`
 
-# Issue M-9: Incorrect swap output token provided in `LeverageManager` when the self-lending pair is podded 
-
-Source: https://github.com/sherlock-audit/2025-01-peapods-finance-judging/issues/245 
-
-## Found by 
-ZoA
-
-### Summary
-
-The `PAIRED_LP_TOKEN` of a pod can be one three types of assets:
-
-- ERC20 like DAI
-- FraxlendPair token, e.g. fDAI(pABC)
-- Pod token of FraxlendPair
-
-In initializing positions in `LeverageManager`, the parameter `_hasSelfLendingPairPod` is provided that indicates whether the paired lp token is a pod or just lending pair LP.
-
-When removing leverage and borrow assets unstaked are not enough to pay back flash loan, some amount of `pTkn` is swapped into borrow assets. However, it does not consider the case when the paired lp token is a pod token of a FraxlendPair, which causes reverts in swap because the Uniswap V2 pool does not exist.
-
-### Root Cause
-
-The root cause is in [`_acquireBorrowTokenForRepayment`](https://github.com/sherlock-audit/2025-01-peapods-finance/blob/d28eb19f4b39d3db7997477460f9f9c76839cb0c/contracts/contracts/lvf/LeverageManager.sol#L434-L446) function of `LeverageManager` contract, where it does not consider the case when the paired lp token is a pod token of a FraxlendPair.
-
-### Internal Pre-conditions
-
-- A pod is setup with podded FraxlendPair LP token as paired LP token
-
-### External Pre-conditions
-
-- A user has added a leverage position in `LeverageManager`
-
-### Attack Path
-
-- Alice had added a leverage position in `LeverageManager` for a pod with podded FraxlendPair LP token as paired LP token
-- Alice attempts to remove her leverage
-- 1000 DAI is borrowed from flash loan to repay the borrow assets on Fraxlend pair
-- By unstaking `aspTkn`, she's got 200 `pTkn` and 800 DAI
-- To repay the flash loan, some amount of `pTkn` is required to be swapped into DAI
-- Since `pTkn`'s paired lp token is a pod token of a FraxlendPair, `pTkn / PairedLPToken` pair exists on Uniswap V2
-- However, the contract tries to swap from `pTkn` to `fTkn`, where the pair does not exist on Uniswap V2
-- Thus, the swap reverts
-
-### Impact
-
-Users cannot remove leverage when the paired lp token is a pod token of a FraxlendPair.
-
-### PoC
-
-_No response_
-
-### Mitigation
-
-When the paired lp token is a pod token of a FraxlendPair, the swap output token should be the pod token instead of lending pair token.
-
-# Issue M-10: The amount of shares needed for redemption of borrow tokens is underquoted during the removal of leverage process leading to reverting. 
+# Issue M-8: The amount of shares needed for redemption of borrow tokens is underquoted during the removal of leverage process leading to reverting. 
 
 Source: https://github.com/sherlock-audit/2025-01-peapods-finance-judging/issues/256 
 
@@ -2251,12 +1986,12 @@ _No response_
 
 Round up the shares needed to be redeemed for the borrow tokens. This is safe because any surplus will later be refunded to the user.
 
-# Issue M-11: Attacker can steal rewards in AutoCompoundingPodLp because he can revert the compounding with slippage 
+# Issue M-9: Attacker can steal rewards in AutoCompoundingPodLp because he can revert the compounding with slippage 
 
 Source: https://github.com/sherlock-audit/2025-01-peapods-finance-judging/issues/274 
 
 ## Found by 
-Schnilch, X77
+Schnilch, X77, pashap9990, rscodes
 
 ### Summary
 
@@ -2876,80 +2611,7 @@ contract AuditTests is PodHelperTest {
 ```
 3. The POC can then be started with `forge test --mt testPoc -vv --fork-url <FORK_URL>`
 
-# Issue M-12: Buy Fee Bypass via Aerodrome Router's Zap Functionality 
-
-Source: https://github.com/sherlock-audit/2025-01-peapods-finance-judging/issues/278 
-
-## Found by 
-silver\_eth
-
-### Summary
-
-look at this line of code in the DecentralizedIndex._update function 
-https://github.com/sherlock-audit/2025-01-peapods-finance/blob/d28eb19f4b39d3db7997477460f9f9c76839cb0c/contracts/contracts/DecentralizedIndex.sol#L161C9-L161C58
-```solidity
-        bool _buy = _from == V2_POOL && _to != V2_ROUTER;
-```
-this entails that any transfer of tokens from the pool to another address that is not the router should incur buy fee charges (unless of course it is a call to removeLiquidity as this can be done with DecentralizedIndex::removeLiquidityV2 which pauses fees), swaps however are meant to incur fees when the recipient of the pod tokens is not the router.
-The routers ie uniswap, camelot and aerodrome dont not use a receive and send mechanism, ie when swapping, they do not first receive tokens to themselves before sending the tokens to the reciepient, rather they pass the recipient directly to the pool which means the condition for buy fee being applied would pass since _to is not the router in _update 
-The issue in aerodrome  router lies in a functionality that the other two do not have ie zap, this allows user to claim liquidity in one token and also allows user to claim all of said token inside the router contracts 
-https://github.com/aerodrome-finance/contracts/blob/a5fae2e87e490d6b10f133e28cc11bcc58c5346a/contracts/Router.sol#L640-L646
-
-```solidity
-    function zapOut(
-        address tokenOut,
-        uint256 liquidity,
-        Zap calldata zapOutPool,
-        Route[] calldata routesA,
-        Route[] calldata routesB
-    ) external {
-```
-
-A user could take advantage of this by swapping to pod tokens with the router as the receiver (bypassing buy fee)
-then on the router zap out the tokens sent there 
-since the default fee on every transfer (0.01%) would likely be much smaller than the buy fee which is maxes at 20%, the user is incentivized to take this route bypassing the fee 
-
-### Root Cause
-
-buy fee conditionality ie allowing buy free transfer when the receiver is the router when there is really no reason for this, the main functionalities of the router are to add liquidity, remove liquidity and swap 
-Both add and remove liquidity can be done feeless as allowed by the protocol 
-swaps on the other hand are meant to incur fees and since the routers dont use and receive then send method, tokens dont go to the router at all during the swap process, the only way for tokens to reach the router after a swap is if the user is donating tokens there 
-
-### Internal Pre-conditions
-
-use of aerodrome adapter which uses the standard aerodrome v2 router 
-non zero buy fee
-
-### External Pre-conditions
-
-none 
-
-### Attack Path
-
-1. user deposit some liquidity to the pool via Decentralizedndex::addLiquidityV2 if they dont have liquidity already 
-2. The userscalls swap with the pod token as the tokenOut and the router as the recipient on the v2pool (this could also be done via the router but doing it via the pool is more gas efficient for the user to use the pool directly) - this would send the pod tokens to the router 
-3. call zapOut on the router with token0ut specified as the pod token 
-
-### Impact
-
-the buy fee is meant to be used as 
-fees for lp stakers ie lp stakers who keep the v2 pool running  will end up receiving less fees 
-profit for pod owners 
-fees to the partner
-
-### PoC
-
-_No response_
-
-### Mitigation
-
-remediate the code to 
-```solidity
-        bool _buy = _from == V2_POOL ;
-```
-
-
-# Issue M-13: The attacker can steal rewards from spTKNs because they can influence the fee processing by making a direct token transfer to the pod when the fees are below the minimum 
+# Issue M-10: The attacker can steal rewards from spTKNs because they can influence the fee processing by making a direct token transfer to the pod when the fees are below the minimum 
 
 Source: https://github.com/sherlock-audit/2025-01-peapods-finance-judging/issues/286 
 
@@ -3541,12 +3203,12 @@ contract AuditTests is PodHelperTest {
 ```
 3. The POC can then be started with `forge test --mt testPoc -vv --fork-url <FORK_URL>`
 
-# Issue M-14: Pods with `hasTransferTax` set to `true` have an incorrect `totalSupply` because the burn fee is applied recursively to itself 
+# Issue M-11: Pods with `hasTransferTax` set to `true` have an incorrect `totalSupply` because the burn fee is applied recursively to itself 
 
 Source: https://github.com/sherlock-audit/2025-01-peapods-finance-judging/issues/291 
 
 ## Found by 
-RampageAudit, Schnilch, TessKimy, exploitabilityexplorer, future2\_22, super\_jack
+PNS, Schnilch, TessKimy, exploitabilityexplorer, future2\_22
 
 ### Summary
 
@@ -4115,12 +3777,12 @@ contract AuditTests is PodHelperTest {
 ```
 3. The POC can then be started with `forge test --mt testPoc -vv --fork-url <FORK_URL>`
 
-# Issue M-15: hardcoded V3_POS_MGR address won't be the same on every chain 
+# Issue M-12: hardcoded V3_POS_MGR address won't be the same on every chain 
 
 Source: https://github.com/sherlock-audit/2025-01-peapods-finance-judging/issues/297 
 
 ## Found by 
-0xAadi, AuditorPraise, axelot, pkqs90
+0xAadi, AuditorPraise, OpaBatyo, X77, axelot, pkqs90
 
 ### Summary
 
@@ -4162,7 +3824,7 @@ _No response_
 
 Make V3_POS_MGR updateable by adding an external function to enable V3_POS_MGR to be updateable
 
-# Issue M-16: Transferring of _userProvidedDebtAmtMax does not work in _acquireBorrowTokenForRepayment because _props.sender is never set, which leads to a transferFrom call from address(0), causing the transaction to revert 
+# Issue M-13: Transferring of _userProvidedDebtAmtMax does not work in _acquireBorrowTokenForRepayment because _props.sender is never set, which leads to a transferFrom call from address(0), causing the transaction to revert 
 
 Source: https://github.com/sherlock-audit/2025-01-peapods-finance-judging/issues/299 
 
@@ -4201,9 +3863,11 @@ No external pre-conditions
 
 A feature of the protocol is not working, which prevents users from providing a portion of the repayment amount for the flash loan themselves. This can lead to users being unable to remove their leverage, especially if the swap doesn't work, for example, due to slippage or the other issue I mentioned above.
 
-# Issue M-17: self-lending does not work with paired tokens that have a transfer tax because addLiquidityV2 does not account for fee-on-transfer on the PAIRED_LP_TOKEN 
+# Issue M-14: self-lending does not work with paired tokens that have a transfer tax because addLiquidityV2 does not account for fee-on-transfer on the PAIRED_LP_TOKEN 
 
 Source: https://github.com/sherlock-audit/2025-01-peapods-finance-judging/issues/300 
+
+The protocol has acknowledged this issue.
 
 ## Found by 
 Schnilch, X77, pkqs90
@@ -4239,7 +3903,7 @@ No external pre-conditions
 
 Self-lending cannot be set up for a PAIRED_LP_TOKEN pod that has transfer tax enabled. As a result, an important feature of the protocol may not be available for certain pods.
 
-# Issue M-18: Malicious actors can front-run setYieldConvEnabled 
+# Issue M-15: Malicious actors can front-run setYieldConvEnabled 
 
 Source: https://github.com/sherlock-audit/2025-01-peapods-finance-judging/issues/313 
 
@@ -4295,46 +3959,12 @@ Malicious actor can steal other users profit
 
 Owner should pause deposit function when he/she wants to call `AutoCompoundingPodLp::setYieldConvEnabled`
 
-# Issue M-19: Stuck rewards and broken invariant due to constant fee assumption 
-
-Source: https://github.com/sherlock-audit/2025-01-peapods-finance-judging/issues/319 
-
-## Found by 
-OpaBatyo
-
-## Summary
-One-sided LP supply uses a formula with fixed values designed for 0.3% fee liquidity pools. However, Aerodrome pools have non-constant fees that are subjects to changes. Refer to Aerodrome's [website](https://aerodrome.finance/liquidity?filters=volatile) - fees for volatile pools vary between 0.04% - 1%. Using a 0.3% one-sided supply formula for a pool with different fee percentage will end up with irretrievable leftover funds and non-functional one-sided supply. 
-## Description
-The one-sided supply formula was designed whenever we have to provide liquidity to a pool but we have some amount of token0 and none of token1. This formula helps us determine how much token0 should we swap for token1 so in the end both us and the liquidity pool end up with equal token0:token1 ratios and we perform a clean provision without any leftovers. The formula is as follows:
-
-$$
-SQRT(((2 - fee) * reservesToken0)^2 + 4(1 - fee) * amountToken0 * reservesToken0) - (2 - fee) * reservesToken0 / (2 * (1 - fee))
-$$
-
-This is currently implemented in [`_getSwapAmt`](https://github.com/sherlock-audit/2025-01-peapods-finance/blob/d28eb19f4b39d3db7997477460f9f9c76839cb0c/contracts/contracts/AutoCompoundingPodLp.sol#L391-L395), however with fixed numbers designed for fee = 0.3% 
-```solidity
-    function _getSwapAmt(address _t0, address _t1, address _swapT, uint256 _fullAmt) internal view returns (uint256) {
-        (uint112 _r0, uint112 _r1) = DEX_ADAPTER.getReserves(DEX_ADAPTER.getV2Pool(_t0, _t1));
-        uint112 _r = _swapT == _t0 ? _r0 : _r1;
-        return (_sqrt(_r * (_fullAmt * 3988000 + _r * 3988009)) - (_r * 1997)) / 1994; // @audit these numbers are for 0.3% exclusively
-    }
-```
-Doing calculations for a specific fee percentage, but executing swaps at a different one will result in imperfect swaps and leftover tokens which will remain in the contract. These funds are also irretrievable as there is no rescue function. Having leftover funds defeats the whole purpose of implementing the one-sided supply flow hence this can be ruled as broken functionality. 
-
-Additionally, the README states that there are no limitations on values set by external admins of integrated protocols. We observed on Aerodrome's website that volatile pool fees are not constant and have been changed in the past by Aerodrome fee managers. The issue has adequate probability and impact.
-
-## Impact
-Broken invariant of one-sided supply functionality
-Stuck funds
-## Mitigation
-Rewrite `_getSwapAmt` to fetch `volatileFee` from Aerodrome's [PoolFactory.getFee](https://github.com/aerodrome-finance/contracts/blob/a5fae2e87e490d6b10f133e28cc11bcc58c5346a/contracts/factories/PoolFactory.sol#L114-L117) and adjust the `2-f` parts of the formula accordingly.
-
-# Issue M-20: Malicious Lenders can Increase the Interest owed by Borrowers Due to Wrong `UtilizationRate` Calculation 
+# Issue M-16: Malicious Lenders can Increase the Interest owed by Borrowers Due to Wrong `UtilizationRate` Calculation 
 
 Source: https://github.com/sherlock-audit/2025-01-peapods-finance-judging/issues/331 
 
 ## Found by 
-Honour, JohnTPark24, X77, future2\_22, octopus\_testjjj, prosper, uuzall
+Honour, X77, future2\_22, octopus\_testjjj, prosper, uuzall
 
 ### Summary
 
@@ -4501,12 +4131,12 @@ _No response_
 
 _No response_
 
-# Issue M-21: Partial Liquidators can Cause the Last Liquidator to Suffer a Loss 
+# Issue M-17: Partial Liquidators can Cause the Last Liquidator to Suffer a Loss 
 
 Source: https://github.com/sherlock-audit/2025-01-peapods-finance-judging/issues/349 
 
 ## Found by 
-pkqs90, uuzall
+pkqs90, prosper, uuzall
 
 ### Summary
 
@@ -4599,7 +4229,7 @@ _No response_
 
 _No response_
 
-# Issue M-22: `spTKNMinimalOracle.sol` counts debond fee twice, which will make the end price (spTKN per base) higher than it should be 
+# Issue M-18: `spTKNMinimalOracle.sol` counts debond fee twice, which will make the end price (spTKN per base) higher than it should be 
 
 Source: https://github.com/sherlock-audit/2025-01-peapods-finance-judging/issues/386 
 
@@ -4670,7 +4300,57 @@ _No response_
 
 Consider dropping the `_accountForUnwrapFeeInPrice` 
 
-# Issue M-23: LendingAssetVault incorrectly updates vaultUtilization if CBR for a single FraxlendPair decreases. 
+# Issue M-19: Incorrect `minAnswer` check doesn't protect the protocol from massive price drops 
+
+Source: https://github.com/sherlock-audit/2025-01-peapods-finance-judging/issues/426 
+
+## Found by 
+TessKimy, X77, pkqs90
+
+### Summary
+
+Incorrect `minAnswer` check doesn't protect the protocol from massive price drops
+
+### Root Cause
+
+In [Chainlink Single Price Oracle](https://github.com/sherlock-audit/2025-01-peapods-finance/blob/main/contracts/contracts/oracle/ChainlinkSinglePriceOracle.sol#L117), `minAnswer` and  `maxAnswer` checks are handled incorrectly. Let say Chainlink returns 1e17 `minAnswer` value for ETH/USD pair. It means aggregator will never return lesser this value. But single price oracle checks it's lower than that value or not.
+
+```solidity
+        if (_answer > _max || _answer < _min) {
+            _isValid = false;
+        }
+```
+
+In conclusion, this if check will never triggered in time correctly.
+
+### Internal Pre-conditions
+
+No need
+
+### External Pre-conditions
+
+1. Actual price of the assets should be lower than `minAnswer` or higher than `maxAnswer`
+
+### Attack Path
+
+1. I can give an example from LUNA's massive price drop
+2. LUNA's price drops through zero
+3. Chainlink won't return lower than `minAnswer` value
+4. Protocol will use wrong price information and it can't even detect it as bad data
+
+### Impact
+
+This is low likelihood issue but it's happened before in history ( LUNA ). Users can buy from real price in external pools and they can use it as collateral by pairing it with pTKN and then they can borrow asset using this inflated price.
+
+### Mitigation
+
+Decide a reasonable gap for it. Because Chainlink won't update the price of the asset's price is lower than min answer and the last answer doesn't have to be equal to minAnswer value.
+
+minAnswer + gap > returned value
+
+This check is much better than just checking minimum answer
+
+# Issue M-20: LendingAssetVault incorrectly updates vaultUtilization if CBR for a single FraxlendPair decreases. 
 
 Source: https://github.com/sherlock-audit/2025-01-peapods-finance-judging/issues/440 
 
@@ -4738,12 +4418,12 @@ N/A
 
 Use the correct formula: `PRECISION - ((PRECISION * _prevVaultCbr) / _vaultWhitelistCbr[_vault]);` for the decreasing scenario.
 
-# Issue M-24: LendingAssetVault should also call `_updateInterestAndMdInAllVaults()` in multiple functions. 
+# Issue M-21: LendingAssetVault should also call `_updateInterestAndMdInAllVaults()` in multiple functions. 
 
 Source: https://github.com/sherlock-audit/2025-01-peapods-finance-judging/issues/454 
 
 ## Found by 
-future2\_22, pkqs90
+X77, future2\_22, pkqs90
 
 
 ### Summary
@@ -4852,7 +4532,7 @@ N/A
 
 Call `_updateInterestAndMdInAllVaults()` for the above four functions.
 
-# Issue M-25: AutoCompoundingPodLp does not work for advanced self-lending pods with podded fTKN as pairedLpTKN. 
+# Issue M-22: AutoCompoundingPodLp does not work for advanced self-lending pods with podded fTKN as pairedLpTKN. 
 
 Source: https://github.com/sherlock-audit/2025-01-peapods-finance-judging/issues/468 
 
@@ -4996,7 +4676,7 @@ N/A
 Add support for the feature.
 
 
-# Issue M-26: AutoCompoundingPodLp `_swapV2()` may lead to leftover tokens in multihops. 
+# Issue M-23: AutoCompoundingPodLp `_swapV2()` may lead to leftover tokens in multihops. 
 
 Source: https://github.com/sherlock-audit/2025-01-peapods-finance-judging/issues/470 
 
@@ -5107,7 +4787,7 @@ N/A
 Always use entire balance of intermediate token for swap.
 
 
-# Issue M-27: spTKNMinimalOracle uses DIA oracle which only supports /USD pairs, which incorrectly assumes all stablecoins are priced at 1 USD. 
+# Issue M-24: spTKNMinimalOracle uses DIA oracle which only supports /USD pairs, which incorrectly assumes all stablecoins are priced at 1 USD. 
 
 Source: https://github.com/sherlock-audit/2025-01-peapods-finance-judging/issues/474 
 
@@ -5241,12 +4921,12 @@ N/A
 Consider the USD and stablecoin (e.g. USDC) difference.
 
 
-# Issue M-28: spTKNMinimalOracle `_calculateSpTknPerBase()` does not return 0, which breaks the feature of having a fallback oracle. 
+# Issue M-25: spTKNMinimalOracle `_calculateSpTknPerBase()` does not return 0, which breaks the feature of having a fallback oracle. 
 
 Source: https://github.com/sherlock-audit/2025-01-peapods-finance-judging/issues/476 
 
 ## Found by 
-pkqs90
+X77, pkqs90
 
 
 ### Summary
@@ -5350,7 +5030,7 @@ N/A
 
 Allow one of the oracles to return 0. Return 0 directly if `_basePerSpTkn18` was 0 in function `_calculateSpTknPerBase()`.
 
-# Issue M-29: spTKNMinimalOracle does not support advanced self-lending pods, where pairedLpTKN is a podded fraxlend token. 
+# Issue M-26: spTKNMinimalOracle does not support advanced self-lending pods, where pairedLpTKN is a podded fraxlend token. 
 
 Source: https://github.com/sherlock-audit/2025-01-peapods-finance-judging/issues/477 
 
@@ -5450,7 +5130,7 @@ N/A
 Support the podded fraxlend token feature.
 
 
-# Issue M-30: AutoCompoundingPodLP does not use correct oracle price as slippage for pairedLpTKn -> pTKN swap. 
+# Issue M-27: AutoCompoundingPodLP does not use correct oracle price as slippage for pairedLpTKn -> pTKN swap. 
 
 Source: https://github.com/sherlock-audit/2025-01-peapods-finance-judging/issues/478 
 
@@ -5546,70 +5226,7 @@ N/A
 Also multiply the asset/share ratio for podded/fraxlend pair tokens as pairedLpTKN.
 
 
-# Issue M-31: Oracle circuit breaker check (minAnswer, maxAnswer) is incorrect. 
-
-Source: https://github.com/sherlock-audit/2025-01-peapods-finance-judging/issues/480 
-
-## Found by 
-X77, pkqs90
-
-
-### Summary
-
-Oracle circuit breaker check (minAnswer, maxAnswer) is incorrect.
-
-### Root Cause
-
-`ChainlinkSinglePriceOracle` implemented a check for circuit breaker, the minAnswer, maxAnswer check. However, this check is wrong.
-
-A simple introduction to the circuit breaker mechanism in Chainlink: For some data feed aggregators, there is a `minAnswer/maxAnswer` check, that if the oracle price feed falls out of range, it will simply return the `minAnswer/maxAnswer`. For example, if the price falls below `minAnswer`, the oracle will simply return `minAnswer`. See https://docs.chain.link/data-feeds#check-the-latest-answer-against-reasonable-limits for more details.
-
-The current check is `if (_answer > _max || _answer < _min)`. However, according to how circuit breakers work, this would never happen, because if the price falls out of the range, it would simply return `_max` and `_min`. The correct check should be `if (_answer >= _max || _answer <= _min)`.
-
-Some examples that still have minAnswer/maxAnswer is the [AAVE/USD](https://arbiscan.io/address/0x3c6AbdA21358c15601A3175D8dd66D0c572cc904#readContract) pair on Arbitrum. The minAnswer is 100000000, maxAnswer is 10000000000000 with a decimal of 8. If AAVE is the underlyingTKN of a pod, with USDC as pairedLpTKN, and supports LVF feature, this oracle would be used.
-
-Note that in history, the circuit breaker caused this issue https://rekt.news/venus-blizz-rekt/ during the LUNA crash.
-
-https://github.com/sherlock-audit/2025-01-peapods-finance/blob/main/contracts/contracts/oracle/ChainlinkSinglePriceOracle.sol#L112
-
-```solidity
-    function _isValidAnswer(address _feed, int256 _answer) internal view returns (bool _isValid) {
-        _isValid = true;
-        int192 _min = IOffchainAggregator(IEACAggregatorProxy(_feed).aggregator()).minAnswer();
-        int192 _max = IOffchainAggregator(IEACAggregatorProxy(_feed).aggregator()).maxAnswer();
-
-        if (_answer > _max || _answer < _min) {
-            _isValid = false;
-        }
-    }
-```
-
-
-### Internal pre-conditions
-
-N/A
-
-### External pre-conditions
-
-N/A
-
-### Attack Path
-
-N/A
-
-### Impact
-
-Oracle would return incorrect price if price falls out of range, which affects lending market.
-
-### PoC
-
-N/A
-
-### Mitigation
-
-Change to `if (_answer >= _max || _answer <= _min)`.
-
-# Issue M-32: LeverageManager closeFee is only collected for pTKN, which can be easily bypassed. 
+# Issue M-28: LeverageManager closeFee is only collected for pTKN, which can be easily bypassed. 
 
 Source: https://github.com/sherlock-audit/2025-01-peapods-finance-judging/issues/485 
 
@@ -5712,7 +5329,7 @@ N/A
 Also charge closeFee for leftover borrowedTKN.
 
 
-# Issue M-33: LeverageManager removeLeverage does not support advanced self-lending pods with podded fTKN as pairedLpTKN. 
+# Issue M-29: LeverageManager removeLeverage does not support advanced self-lending pods with podded fTKN as pairedLpTKN. 
 
 Source: https://github.com/sherlock-audit/2025-01-peapods-finance-judging/issues/487 
 
@@ -5819,51 +5436,7 @@ N/A
 
 Support the feature.
 
-# Issue M-34: AerodromeDexAdapter does not support `swapV2SingleExactOut()`. 
-
-Source: https://github.com/sherlock-audit/2025-01-peapods-finance-judging/issues/493 
-
-## Found by 
-pkqs90
-
-
-### Summary
-
-AerodromeDexAdapter does not support `swapV2SingleExactOut()`.
-
-### Root Cause
-
-AerodromeDexAdapter inherits UniswapDexAdapter but does not override the `swapV2SingleExactOut()` function. Since Aerodrome and Uniswap has completely different API integration, the `swapV2SingleExactOut()` function is bound to fail.
-
-This function is used in LVF when remove leverage for pTKN -> pairedLpTKN swaps, which means the LVF remove leverage feature will not work on Aerodrome.
-
-https://github.com/sherlock-audit/2025-01-peapods-finance/blob/main/contracts/contracts/dex/AerodromeDexAdapter.sol#L1
-
-### Internal pre-conditions
-
-N/A
-
-### External pre-conditions
-
-N/A
-
-### Attack Path
-
-N/A
-
-### Impact
-
-The LVF remove leverage feature will not on Aerodrome.
-
-### PoC
-
-N/A
-
-### Mitigation
-
-Add support for `swapV2SingleExactOut()`.
-
-# Issue M-35: Zapper `_swapV3Single()` has multiple integration issues with V3 swap. 
+# Issue M-30: Zapper `_swapV3Single()` has multiple integration issues with V3 swap. 
 
 Source: https://github.com/sherlock-audit/2025-01-peapods-finance-judging/issues/494 
 
@@ -5992,7 +5565,7 @@ N/A
 N/A
 
 
-# Issue M-36: VotingPool.sol Uniswap V2 pricing formula for spTKN is incorrect 
+# Issue M-31: VotingPool.sol Uniswap V2 pricing formula for spTKN is incorrect 
 
 Source: https://github.com/sherlock-audit/2025-01-peapods-finance-judging/issues/498 
 
@@ -6065,12 +5638,12 @@ N/A
 
 Fix the formula.
 
-# Issue M-37: Malicious liquidator can intentionally leave dust amount of collateral and won't trigger bad debt handling 
+# Issue M-32: Malicious liquidator can intentionally leave dust amount of collateral and won't trigger bad debt handling 
 
 Source: https://github.com/sherlock-audit/2025-01-peapods-finance-judging/issues/500 
 
 ## Found by 
-TessKimy, octopus\_testjjj, pkqs90
+TessKimy, pkqs90
 
 ### Summary
 
@@ -6128,7 +5701,7 @@ _No response_
 
 Choose a reasonable value for `_newMinCollateralRequiredOnDirtyLiquidation` and do not allow liquidators to leave the position's collateral below that value.
 
-# Issue M-38: Transaction may revert unexpectedly due to missing allowance for the lending pair asset 
+# Issue M-33: Transaction may revert unexpectedly due to missing allowance for the lending pair asset 
 
 Source: https://github.com/sherlock-audit/2025-01-peapods-finance-judging/issues/504 
 
@@ -6201,7 +5774,7 @@ _No response_
 
 Instead calculate the share amount using preview interest method
 
-# Issue M-39: Improper Handling of Paused Tokens in `TokenRewards._resetExcluded()` Function 
+# Issue M-34: Improper Handling of Paused Tokens in `TokenRewards._resetExcluded()` Function 
 
 Source: https://github.com/sherlock-audit/2025-01-peapods-finance-judging/issues/517 
 
